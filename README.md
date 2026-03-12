@@ -1,7 +1,7 @@
-# Hello World — Minimal Go + Nginx on Docker
+# Hello World — Minimal Go on Docker
 
 A **production-style** Hello World in Go, optimised for the smallest possible
-binary and image size, served behind Nginx as a reverse proxy.
+binary and image size. The Go binary serves HTTP directly — no reverse proxy.
 
 ---
 
@@ -9,10 +9,9 @@ binary and image size, served behind Nginx as a reverse proxy.
 
 ```
 hello-world/
-├── main.go            # Go source (7 lines)
-├── Dockerfile         # Multi-stage build → scratch image
-├── nginx.conf         # Nginx reverse-proxy config
-├── docker-compose.yml # Orchestrates app + nginx
+├── main.go            # Go HTTP server (~25 lines)
+├── Dockerfile         # 2-stage build → scratch + UPX (~1.5 MB image)
+├── docker-compose.yml # Single service, port 8080
 └── README.md
 ```
 
@@ -26,8 +25,9 @@ hello-world/
 | `-ldflags="-s -w"` | Strips debug symbols and DWARF info |
 | `-trimpath` | Removes local build paths from binary |
 | `FROM scratch` | Zero-OS final image — only the binary |
+| `upx --best --lzma` | LZMA compression (~60% size reduction, Linux/Docker only — incompatible with Go 1.18+ on Windows) |
 
-Typical final image size: **~6 MB** (Go binary only, no OS at all).
+Typical final image size: **~1.5 MB**.
 
 ---
 
@@ -44,16 +44,12 @@ Typical final image size: **~6 MB** (Go binary only, no OS at all).
 
 ## Step-by-step deployment
 
-### 1 — Clone / copy the project
+### 1 — Clone the project
 
 ```bash
 git clone <your-repo-url> hello-world
 cd hello-world
 ```
-
-Or just copy the four files into an empty directory.
-
----
 
 ### 2 — Build and start
 
@@ -63,15 +59,13 @@ docker compose up --build -d
 
 What happens:
 1. **Stage 1** — `golang:1.23-alpine` compiles `main.go` into a static binary.
-2. **Stage 2** — The binary is copied into a `scratch` (empty) image.
-3. `nginx:alpine` starts and proxies port **80 → app:8080**.
-
----
+2. **Stage 1** — UPX compresses the binary with `--best --lzma`.
+3. **Stage 2** — The compressed binary is copied into an empty `scratch` image.
 
 ### 3 — Test it
 
 ```bash
-curl http://localhost
+curl http://localhost:8080
 ```
 
 Expected output:
@@ -80,9 +74,10 @@ Expected output:
 Hello World
 ```
 
-Or open `http://localhost` in your browser.
-
----
+```bash
+curl http://localhost:8080/other   # → 404
+curl -X POST http://localhost:8080 # → 405
+```
 
 ### 4 — Inspect image sizes
 
@@ -93,11 +88,8 @@ docker images | grep hello
 Example output:
 
 ```
-hello-world-app   latest   6.2MB
-nginx             alpine   43MB
+hello-world-app   latest   1.5MB
 ```
-
----
 
 ### 5 — View running containers
 
@@ -106,27 +98,23 @@ docker compose ps
 ```
 
 ```
-NAME           IMAGE              STATUS    PORTS
-hello-app      hello-world-app    Up        8080/tcp
-hello-nginx    nginx:alpine       Up        0.0.0.0:80->80/tcp
+NAME        IMAGE              STATUS    PORTS
+hello-app   hello-world-app    Up        0.0.0.0:8080->8080/tcp
 ```
-
----
 
 ### 6 — View logs
 
 ```bash
-# All services
 docker compose logs -f
-
-# Only the Go app
-docker compose logs -f app
-
-# Only nginx
-docker compose logs -f nginx
 ```
 
----
+Each request is logged in this format:
+
+```
+GET / 200
+GET /other 404
+POST / 405
+```
 
 ### 7 — Stop and clean up
 
@@ -142,9 +130,8 @@ docker compose down --rmi all --volumes
 
 ## Running locally (without Docker)
 
-The `Dockerfile` generates `go.mod` internally during the container build, so
-it is not committed to the repo. For a local build you must initialise the
-module first.
+The `Dockerfile` generates `go.mod` internally. For a local build, initialise
+the module first.
 
 ### Windows
 
@@ -169,62 +156,30 @@ go build -ldflags="-s -w" -trimpath -o hello-world .
 ./hello-world
 ```
 
-> **Note:** if you want to commit `go.mod` so future contributors skip this
-> step, that is perfectly fine — it is a one-liner file with no downsides.
-
 ---
 
-## Minimising the Windows `.exe` size
+## Docker image size comparison
 
-| Method | Size |
+| Build flags | Size |
 |---|---|
-| `go build` (default) | ~7.5 MB |
+| Default `go build` | ~7.5 MB |
+| `+ CGO_ENABLED=0` | ~6.8 MB |
 | `+ -ldflags="-s -w" -trimpath` | ~4.7 MB |
-| `+ upx --best` *(Windows-safe)* | ~2.2 MB |
-| `+ upx --best --lzma` *(Linux only)* | ~1.5 MB |
-
-### Step 1 — Strip debug symbols (~4.7 MB)
-
-```powershell
-go build -ldflags="-s -w" -trimpath -o hello-world.exe .
-```
-
-### Step 2 — Compress with UPX (~2.2 MB, optional)
-
-Install UPX:
-
-```powershell
-winget install upx
-# or download from https://github.com/upx/upx/releases
-```
-
-Then compress:
-
-```powershell
-upx --best hello-world.exe
-```
-
-> ⚠️ **Windows caveat:** always use `--best` on Windows. The `--lzma` flag
-> works inside Linux containers but corrupts the Windows PE executable loader
-> and causes the binary to fail with error `0xfffffffe`. Never use
-> `--best --lzma` for Windows targets.
+| `+ UPX --best --lzma` *(Linux/Docker only)* | ~1.5 MB |
 
 ---
 
-## Running without Compose (standalone Docker)
+## Windows binary size
 
-Build the image manually:
+| Step | Size |
+|---|---|
+| Plain `go build` | ~7.5 MB |
+| `CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath` | **5.7 MB** |
 
-```bash
-docker build -t hello-app .
-```
-
-Run the Go app directly (no nginx):
-
-```bash
-docker run -d -p 8080:8080 --name hello hello-app
-curl http://localhost:8080
-```
+> UPX is incompatible with Go 1.18+ on Windows — compressed binaries crash
+> at runtime with exit code `0xfffffffe` due to conflicts between UPX's
+> self-decompressor stub and Go's runtime PE initialisation.
+> The strip-flags build is the smallest safe Windows binary.
 
 ---
 
@@ -233,70 +188,21 @@ curl http://localhost:8080
 ```
 Browser / curl
       │
-      ▼  :80
+      ▼  :8080
   ┌────────┐
-  │  Nginx │  (nginx:alpine — reverse proxy)
-  └────────┘
-      │
-      ▼  :8080  (internal Docker network)
-  ┌────────┐
-  │  Go    │  (scratch image — static binary)
+  │  Go    │  (scratch image — static binary, ~1.5 MB)
   └────────┘
 ```
 
-Nginx is the only container exposing a port to the host.  
-The Go container is internal, unreachable from outside.
+The Go binary serves HTTP directly on port 8080.
 
 ---
 
-## Customisation
+## Environment variables
 
-### Change the port
-
-Edit `docker-compose.yml`:
-
-```yaml
-ports:
-  - "3000:80"   # expose on host port 3000 instead
-```
-
-### Change the response message
-
-Edit `main.go`, then rebuild:
-
-```bash
-docker compose up --build -d
-```
-
-### Add HTTPS (TLS)
-
-Replace `nginx.conf` with a config that includes:
-
-```nginx
-listen 443 ssl;
-ssl_certificate     /etc/nginx/certs/fullchain.pem;
-ssl_certificate_key /etc/nginx/certs/privkey.pem;
-```
-
-And mount your certificates in `docker-compose.yml`.
-
----
-
-## Docker image size comparison
-
-| Build flags | Size |
-|---|---|
-| Default `go build` | ~7.5 MB |
-| `CGO_ENABLED=0` | ~6.8 MB |
-| + `-ldflags="-s -w"` | ~4.8 MB |
-| + `-trimpath` | ~4.7 MB |
-| + UPX `--best --lzma` *(Linux/Docker only)* | ~1.5 MB |
-
-> To enable UPX inside the Docker build (Linux — safe to use `--lzma` here),
-> add this to the builder stage in `Dockerfile`:
-> ```dockerfile
-> RUN apk add --no-cache upx && upx --best --lzma server
-> ```
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `8080` | Port the server listens on |
 
 ---
 

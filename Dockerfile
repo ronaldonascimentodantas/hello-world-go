@@ -6,7 +6,9 @@ COPY main.go .
 
 RUN go mod init hello && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -trimpath -o server .
+    go build -ldflags="-s -w" -trimpath -o server . && \
+    apk add --no-cache upx && \
+    upx --best --lzma server
 
 # ── Stage 2: Runtime (scratch = zero OS layer) ────────────────────────────────
 FROM scratch
